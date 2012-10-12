@@ -2,6 +2,8 @@ import os
 import unittest
 from __main__ import vtk, qt, ctk, slicer
 
+import manipulator
+
 #
 # SlicerHands
 #
@@ -220,10 +222,18 @@ class SlicerHandsLogic:
         #print('Pointing %s at %s %s %s (conf: %s)' % (m[1], m[5], m[6], m[7], m[-1]))
         pass
       #events = ('PRESSED', 'RELEASED', 'DRAGGED', 'MOVED')
-      events = ('PRESSED', 'RELEASED', 'DRAGGED',)
+      events = ('PRESSED', 'RELEASED', 'DRAGGED')
+      inGestureEvents = ('PRESSED', 'RELEASED', 'DRAGGED')
+      outOfGestureEvents = ('RELEASED',)
       message = ""
       if m[0] in events:
         message += '%s %s' % (m[0], m[-1],)
+        transform,line = self.handCursor(m[-1].title())
+        if m[0] in inGestureEvents:
+          transform.SetAttribute('SlicerHands.gesture', 'pinch')
+        if m[0] in outOfGestureEvents:
+          transform.SetAttribute('SlicerHands.gesture', None)
+
       if message != "":
         slicer.util.showStatusMessage(message)
       if m[0] == 'POSE':
