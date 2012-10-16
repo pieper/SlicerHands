@@ -1,4 +1,4 @@
-import vtk,slicer
+import numpy,vtk,slicer
 
 class Manipulator(object):
   '''A superclass for managing various slicer actions
@@ -64,22 +64,37 @@ class SliceJumper(Manipulator):
     super(SliceJumper,self).__init__()
     self.transform = transform
     self.jumping = False
+    self.lastJumpLocation = numpy.array( (0,0,0) )
+    self.currentJumpLocation = numpy.array( (0,0,0) )
+    self.startOfJumpPosition = numpy.array( (0,0,0) )
     self.observeAttributes( ((transform, ('SlicerHands.gesture',)),) )
     event = slicer.vtkMRMLTransformNode.TransformModifiedEvent
     self.observerTags[transform] = transform.AddObserver(event, self.onTransform)
+
+  def position(self,transformNode):
+    m = vtk.vtkMatrix4x4()
+    transformNode.GetMatrixTransformToWorld(m)
+    return numpy.array( (m.GetElement(0,3),m.GetElement(1,3),m.GetElement(2,3)) )
 
   def onTransform(self,caller,event):
     if self.jumping:
       lm = slicer.app.layoutManager()
       redWidget = lm.sliceWidget('Red')
       redNode = redWidget.mrmlSliceNode()
-      m = vtk.vtkMatrix4x4()
-      caller.GetMatrixTransformToWorld(m)
-      p = (m.GetElement(0,3),m.GetElement(1,3),m.GetElement(2,3))
-      redNode.JumpSlice(*p)
-      redNode.JumpAllSlices(*p)
+      currentPosition = self.position(caller)
+      move = currentPosition - self.startOfJumpPosition
+      self.currentJumpLocation = self.lastJumpLocation + move
+      redNode.JumpSlice(*self.currentJumpLocation)
+      redNode.JumpAllSlices(*self.currentJumpLocation)
 
   def onAttributeChanged(self,node,attribute,newValue,oldValue):
     if node == self.transform:
       if attribute == 'SlicerHands.gesture':
-        self.jumping = newValue == 'pinch'
+        newJumpState = newValue == 'pinch'
+        if newJumpState and not self.jumping:
+          # start of a jump action
+          self.startOfJumpPosition = self.position(node)
+        if not newJumpState and self.jumping:
+          # end of a jump action
+          self.lastJumpLocation = self.currentJumpLocation
+        self.jumping = newJumpState
