@@ -104,7 +104,7 @@ class SlicerHandsWidget:
     # update camera transform (temp)
     self.updateCameraButton = qt.QPushButton("UpdateCameraTransform")
     parametersFormLayout.addWidget(self.updateCameraButton)
-    self.updateCameraButton.connect('clicked()', self.updateCamera)
+    self.updateCameraButton.connect('clicked()', self.logic.updateCamera)
 
     # Add vertical spacer
     self.layout.addStretch(1)
@@ -128,15 +128,6 @@ class SlicerHandsWidget:
     self.disconnectFromHandsButton.enabled = False
     self.connectToHandsButton.enabled = True
 
-  def updateCamera(self):
-    cameraToRAS,distance = self.logic.cameraTransform()
-    tableToCamera = self.logic.tableCursor()
-    tableToCamera.GetMatrixTransformToParent().SetElement(2, 3, -distance)
-    tableToCamera.SetAndObserveTransformNodeID(cameraToRAS.GetID())
-    leftToTable,leftHandLine = self.logic.handCursor('Left')
-    rightToTable,rightHandLine = self.logic.handCursor('Right')
-    for node in (leftToTable,leftHandLine,rightToTable,rightHandLine):
-      node.SetAndObserveTransformNodeID(tableToCamera.GetID())
 
   def onReload(self,moduleName="SlicerHands"):
     """Generic reload method for any scripted module.
@@ -196,6 +187,8 @@ class SlicerHandsLogic:
     self.host='localhost'
     self.port=1988
     self.socket = None
+    self.latestPose = None
+    self.observerTags = []
 
   def __del__(self):
     self.disconnectFromHands()
@@ -208,12 +201,22 @@ class SlicerHandsLogic:
     self.socket.connectToHost(self.host, self.port)
     self.socket.connect('readyRead()', self.handleRead)
 
+    tv = self.threeDView()
+    rw = tv.renderWindow()
+    tag = rw.AddObserver(vtk.vtkCommand.EndEvent,self.applyPose)
+    self.observerTags.append((rw,tag))
+
+    #tag = self.cameraNode().AddObserver(vtk.vtkCommand.ModifiedEvent, self.updateCamera)
+    #self.observerTags.append((cameraNode,tag))
+
   def disconnectFromHands(self):
     """
     terminate the connection
     """
     self.socket.abort()
     self.socket.close()
+    for obj,tag in self.observerTags:
+      obj.RemoveObserver(tag)
 
   def handleRead(self):
     while self.socket.canReadLine():
@@ -237,20 +240,58 @@ class SlicerHandsLogic:
       if message != "":
         slicer.util.showStatusMessage(message)
       if m[0] == 'POSE':
-        pl = map(float,m[1:4])
-        pr = map(float,m[9:12])
-        leftTransform,leftHandLine = self.handCursor('Left')
-        rightTransform,rightHandLine = self.handCursor('Right')
-        for t,p in ( (leftTransform,pl), (rightTransform,pr) ):
-          t.GetMatrixTransformToParent().SetElement(0, 3, p[0])
-          t.GetMatrixTransformToParent().SetElement(1, 3, p[1])
-          t.GetMatrixTransformToParent().SetElement(2, 3, p[2])
-        for handLine,p in ( (leftHandLine,pl), (rightHandLine,pr) ):
-          points = handLine.GetPolyData().GetPoints()
-          points.SetPoint(0,p[0], 0.0,p[2])
-          points.SetPoint(1,p[0],p[1],p[2])
-          handLine.GetPolyData().Modified()
+        self.savePose(m)
 
+  def savePose(self,pose):
+    """Keep track of the latest pose so it can be
+    set after the Render is completed"""
+    self.latestPose = pose
+
+  def applyPose(self,caller,event):
+    """Transfer the latest pose to the transform nodes
+    to trigger changes in the scene, and then a render"""
+    if not self.latestPose:
+      return
+    m = self.latestPose
+    pl = map(float,m[1:4])
+    pr = map(float,m[9:12])
+    leftTransform,leftHandLine = self.handCursor('Left')
+    rightTransform,rightHandLine = self.handCursor('Right')
+    for t,p in ( (leftTransform,pl), (rightTransform,pr) ):
+      t.GetMatrixTransformToParent().SetElement(0, 3, p[0])
+      t.GetMatrixTransformToParent().SetElement(1, 3, p[1])
+      t.GetMatrixTransformToParent().SetElement(2, 3, p[2])
+    for handLine,p in ( (leftHandLine,pl), (rightHandLine,pr) ):
+      points = handLine.GetPolyData().GetPoints()
+      points.SetPoint(0,p[0], 0.0,p[2])
+      points.SetPoint(1,p[0],p[1],p[2])
+      handLine.GetPolyData().Modified()
+
+  def updateCamera(self,caller=None,event=None):
+    cameraToRAS,distance = self.cameraTransform()
+    tableToCamera = self.tableCursor()
+    tableToCamera.GetMatrixTransformToParent().SetElement(2, 3, -distance)
+    tableToCamera.SetAndObserveTransformNodeID(cameraToRAS.GetID())
+    leftToTable,leftHandLine = self.handCursor('Left')
+    rightToTable,rightHandLine = self.handCursor('Right')
+    for node in (leftToTable,leftHandLine,rightToTable,rightHandLine):
+      node.SetAndObserveTransformNodeID(tableToCamera.GetID())
+
+  def threeDView(self):
+    """Return the current camera node"""
+    lm = slicer.app.layoutManager()
+    threeDWidget = lm.threeDWidget(0)
+    return threeDWidget.threeDView()
+
+  def cameraNode(self):
+    """Return the current camera node"""
+    # update transform with current camera parameters - only default view for now
+    viewNode = self.threeDView().mrmlViewNode()
+    cameraNodes = slicer.util.getNodes('vtkMRMLCameraNode*')
+    for cameraNode in cameraNodes.values():
+      if cameraNode.GetActiveTag() == viewNode.GetID():
+        return cameraNode
+    return None
 
   def cameraTransform(self):
     """Create the transform and the observer for the camera
@@ -263,16 +304,7 @@ class SlicerHandsLogic:
       transformNode.SetName(transformName)
       slicer.mrmlScene.AddNode(transformNode)
 
-    # update transform with current camera parameters - only default view for now
-    lm = slicer.app.layoutManager()
-    threeDWidget = lm.threeDWidget(0)
-    threeDView = threeDWidget.threeDView()
-    viewNode = threeDView.mrmlViewNode()
-    cameraNodes = slicer.util.getNodes('vtkMRMLCameraNode*')
-    for cameraNode in cameraNodes.values():
-      if cameraNode.GetActiveTag() == viewNode.GetID():
-        break
-    camera = cameraNode.GetCamera()
+    camera = self.cameraNode().GetCamera()
 
     import numpy
     position = numpy.array(camera.GetPosition())
